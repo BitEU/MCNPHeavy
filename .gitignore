@@ -1,0 +1,7 @@
+/team_data
+*.exe
+*.obj
+*.pdb
+*.ilk
+*.o
+/.claude
