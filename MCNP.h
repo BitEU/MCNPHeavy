@@ -1,12 +1,9 @@
 /*
- * Monte Carlo Neutron Transport Program
- * k-effective Criticality Calculator
- * 
- * Compatible with UNIVAC 1219 and Windows conhost
- * 
- * Function: Uses Monte Carlo method (random sampling) to simulate neutron
- *           paths through shielding materials and calculate k-effective
- *           (multiplication factor) for criticality assessment.
+ * Program Name: MCNPHeavy
+ * Program Release Year: 2025
+ * Program Author: Steven S.
+ * Program Link: https://github.com/BitEU/MCNPHeavy
+ * Purpose: A Monte Carlo Neutron Transport program for k-effective criticality calculation with Windows Console/UNIVAC 1219 support
  */
 
 #ifndef MCNP_H
