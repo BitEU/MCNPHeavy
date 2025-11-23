@@ -83,17 +83,23 @@ int main(void) {
 #ifndef UNIVAC
     console_setup();
 #endif
-    
-    SimState state;
-    
-    /* Initialize with zeros (BSS initialization) */
-    memset(&state, 0, sizeof(SimState));
-    
+
+    /* Allocate on heap - SimState is too large for stack */
+    SimState* state = (SimState*)malloc(sizeof(SimState));
+    if (!state) {
+        fprintf(stderr, "Error: Failed to allocate memory for simulation state\n");
+        return 1;
+    }
+
+    /* Initialize with zeros */
+    memset(state, 0, sizeof(SimState));
+
     print_header();
-    init_simulation(&state);
-    run_simulation(&state);
-    print_results(&state);
-    
+    init_simulation(state);
+    run_simulation(state);
+    print_results(state);
+
+    free(state);
     return 0;
 }
 
@@ -382,46 +388,65 @@ int find_region(const Vector3* pos, const Config* config) {
 
 double distance_to_boundary(const Neutron* n, const Config* config, int* next_region) {
     /* Calculate distance to nearest boundary along neutron direction */
-    /* For spherical geometry only (simplified) */
-    
+    /* For nested spherical geometry */
+
     int current_region = find_region(&n->position, config);
+    double min_dist = 1e10;
+    *next_region = current_region;
+
+    /* Check distance to current region's outer boundary */
     const Region* reg = &config->regions[current_region];
-    
     if (reg->geometry_type == GEOM_SPHERE) {
-        /* Ray-sphere intersection */
         Vector3 oc;
         oc.x = n->position.x - reg->center.x;
         oc.y = n->position.y - reg->center.y;
         oc.z = n->position.z - reg->center.z;
-        
+
+        double a = 1.0;  /* direction is unit vector */
         double b = 2.0 * vector_dot(&oc, &n->direction);
         double c = vector_dot(&oc, &oc) - reg->radius * reg->radius;
-        double discriminant = b*b - 4.0*c;
-        
-        if (discriminant < 0) {
-            /* Moving away from center, check outer sphere */
-            if (current_region + 1 < config->num_regions) {
-                *next_region = current_region + 1;
-                return distance_to_boundary(n, config, next_region);
+        double discriminant = b*b - 4.0*a*c;
+
+        if (discriminant >= 0) {
+            double sqrt_disc = sqrt(discriminant);
+            double t2 = (-b + sqrt_disc) / (2.0*a);  /* Exit point (always positive for point inside sphere) */
+
+            if (t2 > 1e-6 && t2 < min_dist) {
+                min_dist = t2;
+                /* Moving to next outer region */
+                *next_region = (current_region + 1 < config->num_regions) ?
+                               current_region + 1 : current_region;
             }
-            return 1e10;  /* Very large distance */
-        }
-        
-        double t1 = (-b - sqrt(discriminant)) / 2.0;
-        double t2 = (-b + sqrt(discriminant)) / 2.0;
-        
-        /* Use positive root */
-        double dist = (t1 > 1e-6) ? t1 : t2;
-        
-        if (dist > 1e-6) {
-            *next_region = (current_region + 1 < config->num_regions) ? 
-                           current_region + 1 : current_region;
-            return dist;
         }
     }
-    
-    *next_region = current_region;
-    return 1e10;  /* Very large distance */
+
+    /* Check distance to inner boundary (if we're not in innermost region) */
+    if (current_region > 0) {
+        const Region* inner_reg = &config->regions[current_region - 1];
+        if (inner_reg->geometry_type == GEOM_SPHERE) {
+            Vector3 oc;
+            oc.x = n->position.x - inner_reg->center.x;
+            oc.y = n->position.y - inner_reg->center.y;
+            oc.z = n->position.z - inner_reg->center.z;
+
+            double a = 1.0;
+            double b = 2.0 * vector_dot(&oc, &n->direction);
+            double c = vector_dot(&oc, &oc) - inner_reg->radius * inner_reg->radius;
+            double discriminant = b*b - 4.0*a*c;
+
+            if (discriminant >= 0) {
+                double sqrt_disc = sqrt(discriminant);
+                double t1 = (-b - sqrt_disc) / (2.0*a);  /* Entry point into inner sphere */
+
+                if (t1 > 1e-6 && t1 < min_dist) {
+                    min_dist = t1;
+                    *next_region = current_region - 1;
+                }
+            }
+        }
+    }
+
+    return min_dist;
 }
 
 void move_neutron(Neutron* n, double distance) {
@@ -619,10 +644,16 @@ void handle_fission(Neutron* n, Tallies* tallies, SimState* state) {
     /* Sample number of neutrons from fission (energy-dependent) */
     const Material* mat = &state->config.materials[MAT_U235];
     const CrossSectionData* xs = &mat->xs[n->energy_group];
-    
+
     /* Track average neutrons produced (nu varies slightly with energy) */
     state->neutrons_next_gen += xs->nu;
-    
+
+    /* Store fission site for next generation source */
+    if (state->num_fission_sites < MAX_FISSION_SITES) {
+        state->fission_sites[state->num_fission_sites] = n->position;
+        state->num_fission_sites++;
+    }
+
     tallies->fissions++;
     tallies->fissions_by_group[n->energy_group]++;
     n->alive = 0;  /* Original neutron absorbed in fission */
@@ -650,9 +681,14 @@ void track_neutron(Neutron* n, SimState* state) {
         
         const Material* mat = &state->config.materials[mat_id];
         const CrossSectionData* xs = &mat->xs[n->energy_group];
-        
+
         /* Sample distance to collision using energy-dependent cross-section */
-        double mfp = 1.0 / (xs->sigma_total * mat->density * 6.022e-1);  /* mean free path */
+        /* mfp = 1 / (sigma * N) where N = rho * Na / A */
+        /* sigma in barns (1e-24 cm^2), rho in g/cm^3, A in g/mol */
+        /* N = rho * 0.6022 / A (in units of 1e24 atoms/cm^3) */
+        double number_density = mat->density * 0.6022 / mat->atomic_mass;  /* 1e24 atoms/cm^3 */
+        double macro_xs = xs->sigma_total * number_density;  /* cm^-1 */
+        double mfp = 1.0 / macro_xs;  /* mean free path in cm */
         double dist_collision = rand_exponential(1.0 / mfp);
         
         /* Check distance to boundary */
@@ -692,19 +728,48 @@ void track_neutron(Neutron* n, SimState* state) {
 void run_generation(SimState* state) {
     state->neutrons_next_gen = 0.0;
     state->neutrons_this_gen = (double)state->config.num_particles;
-    
+
+    /* Save previous generation's fission sites on heap */
+    int num_prev_sites = state->num_fission_sites;
+    Vector3* prev_fission_sites = NULL;
+    if (num_prev_sites > 0) {
+        prev_fission_sites = (Vector3*)malloc(num_prev_sites * sizeof(Vector3));
+        if (prev_fission_sites) {
+            memcpy(prev_fission_sites, state->fission_sites, num_prev_sites * sizeof(Vector3));
+        } else {
+            num_prev_sites = 0;  /* Fall back to uniform sampling */
+        }
+    }
+
+    /* Reset fission site counter for this generation */
+    state->num_fission_sites = 0;
+
     /* Track all neutrons in this generation */
     for (int i = 0; i < state->config.num_particles; i++) {
         Neutron n;
-        
-        /* Initialize neutron at center of fissile core */
-        n.position.x = 0.0;
-        n.position.y = 0.0;
-        n.position.z = 0.0;
-        
+
+        /* Sample neutron starting position */
+        if (num_prev_sites > 0 && state->current_generation > 0) {
+            /* Sample from previous generation's fission sites */
+            int site_idx = (int)(rand_uniform() * num_prev_sites);
+            if (site_idx >= num_prev_sites) site_idx = num_prev_sites - 1;
+            n.position = prev_fission_sites[site_idx];
+        } else {
+            /* First generation: uniform sampling in fissile core */
+            double core_radius = state->config.regions[0].radius;
+            /* Sample uniformly in sphere using rejection or cube-root method */
+            double r = core_radius * pow(rand_uniform(), 1.0/3.0);
+            double cos_theta = 2.0 * rand_uniform() - 1.0;
+            double sin_theta = sqrt(1.0 - cos_theta * cos_theta);
+            double phi = 2.0 * PI * rand_uniform();
+            n.position.x = r * sin_theta * cos(phi);
+            n.position.y = r * sin_theta * sin(phi);
+            n.position.z = r * cos_theta;
+        }
+
         /* Random isotropic direction */
         rand_isotropic_direction(&n.direction);
-        
+
         /* Sample energy from fission spectrum (realistic birth energy) */
         n.energy = sample_fission_energy();
         n.energy_group = get_energy_group(n.energy);
@@ -712,9 +777,14 @@ void run_generation(SimState* state) {
         n.alive = 1;
         n.generation = state->current_generation;
         n.collisions = 0;
-        
+
         /* Track this neutron */
         track_neutron(&n, state);
+    }
+
+    /* Free previous generation's fission sites */
+    if (prev_fission_sites) {
+        free(prev_fission_sites);
     }
 }
 

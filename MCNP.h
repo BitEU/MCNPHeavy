@@ -25,6 +25,7 @@
 #define MAX_REGIONS 20
 #define MAX_GENERATIONS 100
 #define MAX_PARTICLES 10000
+#define MAX_FISSION_SITES 50000
 #define PI 3.14159265358979323846
 
 /* Multi-group energy structure */
@@ -154,6 +155,8 @@ typedef struct {
     int current_generation;
     double neutrons_this_gen;
     double neutrons_next_gen;
+    Vector3 fission_sites[MAX_FISSION_SITES];  /* Fission sites for next generation */
+    int num_fission_sites;                      /* Number of fission sites stored */
 } SimState;
 
 /* Function declarations */
