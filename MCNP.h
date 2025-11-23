@@ -165,6 +165,11 @@ void init_geometry(SimState* state);
 void init_tallies(Tallies* tallies);
 void setup_test_problem(SimState* state);
 
+/* Runtime input helpers (prompt + accept default when left blank) */
+double prompt_double_with_default(const char* prompt, double default_val);
+int prompt_int_with_default(const char* prompt, int default_val);
+int prompt_choice_with_default(const char* prompt, int default_val, const char* const options[], int num_options);
+
 /* Random number generation (Linear Congruential Generator for portability) */
 void seed_rng(unsigned long seed);
 double rand_uniform(void);

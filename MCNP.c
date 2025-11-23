@@ -148,9 +148,15 @@ void setup_test_problem(SimState* state) {
     printf("Goal: Calculate k-effective to determine criticality\n");
     printf("Physics: Multi-group energy transport with anisotropic scattering\n\n");
     
-    /* Set simulation parameters */
-    state->config.num_particles = 1000;
-    state->config.num_generations = 50;
+    /* Set default simulation parameters (may be overridden by user input) */
+    int default_particles = 1000;
+    int default_generations = 50;
+
+    /* Ask user for simple runtime configuration with defaults */
+    printf("\nYou can accept defaults by pressing Enter when prompted.\n");
+
+    state->config.num_particles = prompt_int_with_default("Neutrons per generation", default_particles);
+    state->config.num_generations = prompt_int_with_default("Number of generations", default_generations);
     
     /* Define geometry: nested spheres */
     state->config.num_regions = 3;
@@ -161,7 +167,20 @@ void setup_test_problem(SimState* state) {
     state->config.regions[0].center.x = 0.0;
     state->config.regions[0].center.y = 0.0;
     state->config.regions[0].center.z = 0.0;
-    state->config.regions[0].radius = 8.7;  /* cm - near-critical for bare U-235 */
+    /* Geometry defaults */
+    double default_core_r = 8.7;  /* cm - near-critical for bare U-235 */
+    double default_refl_r = 18.7; /* cm - includes 10 cm reflector */
+
+    double core_r = prompt_double_with_default("Core (U-235) sphere radius (cm)", default_core_r);
+    double refl_r = prompt_double_with_default("Reflector outer radius (cm)", default_refl_r);
+
+    /* Ensure sensible ordering */
+    if (refl_r <= core_r) {
+        printf("  Warning: reflector radius <= core radius; adjusting reflector to core + 2.0 cm\n");
+        refl_r = core_r + 2.0;
+    }
+
+    state->config.regions[0].radius = core_r;
     state->config.critical_radius = state->config.regions[0].radius;
     
     /* Region 1: Water reflector shell */
@@ -170,7 +189,7 @@ void setup_test_problem(SimState* state) {
     state->config.regions[1].center.x = 0.0;
     state->config.regions[1].center.y = 0.0;
     state->config.regions[1].center.z = 0.0;
-    state->config.regions[1].radius = 18.7;  /* 10 cm water reflector */
+    state->config.regions[1].radius = refl_r;  /* outer radius of reflector */
     
     /* Region 2: Void (outside) */
     state->config.regions[2].geometry_type = GEOM_SPHERE;
@@ -180,9 +199,43 @@ void setup_test_problem(SimState* state) {
     state->config.regions[2].center.z = 0.0;
     state->config.regions[2].radius = 1000.0;  /* Effective infinity */
     
+    /* Allow user to select materials for core & reflector */
+    printf("\nAvailable materials:\n");
+    for (int i = 0; i < state->config.num_materials; ++i) {
+        printf("  %d) %s\n", i, state->config.materials[i].name);
+    }
+
+    /* Defaults by type */
+    int default_core_mat = MAT_U235; /* choose by type */
+    int default_refl_mat = MAT_WATER;
+
+    /* Try to map type to index if possible */
+    int default_core_idx = 1; /* fallback */
+    int default_refl_idx = 4; /* fallback */
+    for (int i = 0; i < state->config.num_materials; ++i) {
+        if (state->config.materials[i].type == default_core_mat) default_core_idx = i;
+        if (state->config.materials[i].type == default_refl_mat) default_refl_idx = i;
+    }
+
+    int chosen_core_idx = prompt_int_with_default("Core material index", default_core_idx);
+    if (chosen_core_idx < 0 || chosen_core_idx >= state->config.num_materials) {
+        printf("  Invalid selection, using default (%d)\n", default_core_idx);
+        chosen_core_idx = default_core_idx;
+    }
+
+    int chosen_refl_idx = prompt_int_with_default("Reflector material index", default_refl_idx);
+    if (chosen_refl_idx < 0 || chosen_refl_idx >= state->config.num_materials) {
+        printf("  Invalid selection, using default (%d)\n", default_refl_idx);
+        chosen_refl_idx = default_refl_idx;
+    }
+
+    /* Apply material selections */
+    state->config.regions[0].material_id = state->config.materials[chosen_core_idx].type;
+    state->config.regions[1].material_id = state->config.materials[chosen_refl_idx].type;
+
     printf("Geometry Configuration:\n");
-    printf("  Core: U-235 sphere, radius = %.2f cm\n", state->config.regions[0].radius);
-    printf("  Reflector: Water shell, outer radius = %.2f cm\n", state->config.regions[1].radius);
+    printf("  Core: %s sphere, radius = %.2f cm\n", state->config.materials[chosen_core_idx].name, state->config.regions[0].radius);
+    printf("  Reflector: %s shell, outer radius = %.2f cm\n", state->config.materials[chosen_refl_idx].name, state->config.regions[1].radius);
     printf("  Outside: Void (leakage)\n\n");
     
     printf("Simulation Parameters:\n");
@@ -191,6 +244,72 @@ void setup_test_problem(SimState* state) {
     printf("  Energy groups: %d (Fast, Epithermal, Thermal)\n", NUM_ENERGY_GROUPS);
     printf("  Total neutron histories: %d\n", 
            state->config.num_particles * state->config.num_generations);
+}
+
+/* ========================= Runtime prompt helpers ======================== */
+
+/* Trim whitespace and newline from end of string */
+static void trim_newline(char* s) {
+    if (!s) return;
+    size_t len = strlen(s);
+    while (len > 0 && (s[len-1] == '\n' || s[len-1] == '\r' || s[len-1] == ' ' || s[len-1] == '\t')) {
+        s[len-1] = '\0';
+        --len;
+    }
+}
+
+double prompt_double_with_default(const char* prompt, double default_val) {
+    char buf[128];
+    double val = default_val;
+
+    printf("%s [default: %.2f]: ", prompt, default_val);
+    if (!fgets(buf, sizeof(buf), stdin)) {
+        clearerr(stdin);
+        return default_val;
+    }
+    trim_newline(buf);
+
+    if (buf[0] == '\0') {
+        return default_val;
+    }
+
+    char* endp = NULL;
+    val = strtod(buf, &endp);
+    if (endp == buf) {
+        printf("  Warning: invalid number; using default %.2f\n", default_val);
+        return default_val;
+    }
+
+    return val;
+}
+
+int prompt_int_with_default(const char* prompt, int default_val) {
+    char buf[128];
+    long val = default_val;
+
+    printf("%s [default: %d]: ", prompt, default_val);
+    if (!fgets(buf, sizeof(buf), stdin)) {
+        clearerr(stdin);
+        return default_val;
+    }
+    trim_newline(buf);
+
+    if (buf[0] == '\0') return default_val;
+
+    char* endp = NULL;
+    val = strtol(buf, &endp, 10);
+    if (endp == buf) {
+        printf("  Warning: invalid integer; using default %d\n", default_val);
+        return default_val;
+    }
+
+    return (int)val;
+}
+
+int prompt_choice_with_default(const char* prompt, int default_val, const char* const options[], int num_options) {
+    /* Not used currently, left as a convenience for future prompts. */
+    (void)options; (void)num_options;
+    return prompt_int_with_default(prompt, default_val);
 }
 
 /* ========================================================================== */
